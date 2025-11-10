@@ -1,0 +1,11 @@
+data_dir = "../data/"
+gnn_data_dir = "../data/"
+n_features = 65
+bs = 128
+max_epochs = 500
+lr = 1e-3
+l2_lambda = 1e-4
+patience=25
+best_model1 = 'baseline_gnn_best1.pt'
+best_model2 = 'baseline_gnn_best2.pt'
+best_model3 = 'baseline_gnn_best3.pt'
