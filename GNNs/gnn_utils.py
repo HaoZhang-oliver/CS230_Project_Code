@@ -30,7 +30,7 @@ from sklearn.metrics import mean_squared_error
 from sklearn.metrics import mean_absolute_error
 from sklearn.metrics import r2_score
 from scipy.stats import spearmanr
-
+import json
 import pickle, gzip
 import config
 
@@ -270,21 +270,9 @@ def create_data():
     with gzip.open(config.gnn_data_dir+"test.pkl.gz", "wb") as f:
         pickle.dump(test_X, f, protocol=4)
         
-        
-        
-
 class EarlyStopping:
-    """Early stops the training if validation loss doesn't improve after a given patience."""
     def __init__(self, patience=7, verbose=False, delta=0, chkpoint_name = 'gnn_best.pt' ):
-        """
-        Args:
-            patience (int): How long to wait after last time validation loss improved.
-                            Default: 7
-            verbose (bool): If True, prints a message for each validation loss improvement. 
-                            Default: False
-            delta (float): Minimum change in the monitored quantity to qualify as an improvement.
-                            Default: 0
-        """
+
         self.patience = patience
         self.verbose = verbose
         self.counter = 0
@@ -377,3 +365,115 @@ def get_results(db_name, loader, model, device):
     plt.axis('equal');
     plt.show()
 
+
+class FGData(Data):
+
+    def __inc__(self, key, value, *args, **kwargs):
+        if key == "fg_edge_index":
+            return int(getattr(self, "fg_num_nodes", 0))
+
+        if key == "atom2fg_edge_index":
+            fg_n = int(getattr(self, "fg_num_nodes", 0))
+            return torch.tensor([[self.num_nodes], [fg_n]])
+
+        return super().__inc__(key, value, *args, **kwargs)
+
+
+def load_pkl_gz(path):
+    with gzip.open(path, "rb") as f:
+        return pickle.load(f)
+
+
+def load_accfg_vocab(vocab_json_path):
+
+    with open(vocab_json_path, "r", encoding="utf-8") as f:
+        obj = json.load(f)
+    fg_types = obj.get("fg_types", [])
+    fg2id = {t: i for i, t in enumerate(fg_types)}
+
+    if "__UNK__" not in fg2id:
+        fg2id["__UNK__"] = len(fg2id)
+    return fg2id, fg2id["__UNK__"]
+
+
+def _resolve_fg_pkl_path(data_dir, split):
+
+    for suf in getattr(config, "fg_pkl_suffix_candidates", ["_fg.pkl.gz", "_withFG.pkl.gz"]):
+        cand = os.path.join(data_dir, f"{split}{suf}")
+        if os.path.exists(cand):
+            return cand
+    raise FileNotFoundError(
+        f"Cannot find FG pkl for split='{split}'. Tried suffixes={getattr(config,'fg_pkl_suffix_candidates',None)} "
+        f"under data_dir={data_dir}"
+    )
+
+
+def attach_fg_to_data_list(atom_data_list, fg_rec_list, fg2id, unk_id):
+
+    if len(atom_data_list) != len(fg_rec_list):
+        raise ValueError(f"Length mismatch: atom_data={len(atom_data_list)} vs fg_rec={len(fg_rec_list)}")
+
+    out = []
+    for d, rec in zip(atom_data_list, fg_rec_list):
+
+        fg_names = rec.get("fg_names", [])
+        fg_type_ids = torch.tensor(
+            [fg2id.get(n, unk_id) for n in fg_names],
+            dtype=torch.long
+        )
+        fg_num_nodes = int(len(fg_names))
+
+        fg_edge_index = rec.get("fg_edge_index", None)
+        if fg_edge_index is None:
+            fg_edge_index = np.zeros((2, 0), dtype=np.int64)
+        fg_edge_index = torch.from_numpy(np.asarray(fg_edge_index, dtype=np.int64)).long()
+        if fg_edge_index.numel() == 0:
+            fg_edge_index = fg_edge_index.reshape(2, 0)
+
+        fg_edge_attr = rec.get("fg_edge_attr", None)
+        if fg_edge_attr is None:
+            fg_edge_attr = np.zeros((0, 6), dtype=np.float32)
+        fg_edge_attr = torch.from_numpy(np.asarray(fg_edge_attr, dtype=np.float32)).float()
+
+        atom2fg_edge_index = rec.get("atom2fg_edge_index", None)
+        if atom2fg_edge_index is None:
+            atom2fg_edge_index = np.zeros((2, 0), dtype=np.int64)
+        atom2fg_edge_index = torch.from_numpy(np.asarray(atom2fg_edge_index, dtype=np.int64)).long()
+        if atom2fg_edge_index.numel() == 0:
+            atom2fg_edge_index = atom2fg_edge_index.reshape(2, 0)
+
+        nd = FGData(
+            x=d.x,
+            edge_index=d.edge_index,
+            edge_attr=d.edge_attr,
+            y=d.y,
+            idx=getattr(d, "idx", None),
+        )
+        nd.fg_type_ids = fg_type_ids
+        nd.fg_num_nodes = fg_num_nodes
+        nd.fg_edge_index = fg_edge_index
+        nd.fg_edge_attr = fg_edge_attr
+        nd.atom2fg_edge_index = atom2fg_edge_index
+
+        out.append(nd)
+
+    return out
+
+
+def load_split_with_fg(split, data_dir=None, vocab_json_path=None):
+
+    if data_dir is None:
+        data_dir = config.data_dir
+    if vocab_json_path is None:
+        vocab_json_path = getattr(config, "accfg_vocab_json", os.path.join(data_dir, "accfg_vocab.json"))
+
+    fg2id, unk_id = load_accfg_vocab(vocab_json_path)
+
+    atom_pkl = os.path.join(data_dir, f"{split}.pkl.gz")
+    fg_pkl = _resolve_fg_pkl_path(data_dir, split)
+
+    atom_list = load_pkl_gz(atom_pkl)
+    fg_list = load_pkl_gz(fg_pkl)
+
+    merged = attach_fg_to_data_list(atom_list, fg_list, fg2id, unk_id)
+    return merged, fg2id
